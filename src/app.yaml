@@ -1,0 +1,19 @@
+# Databricks App runtime config.
+# The app reads its SQL warehouse from the DATABRICKS_WAREHOUSE_ID env var, which the
+# bundle-declared `sql-warehouse` resource injects automatically at deploy time.
+command:
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  # Surface the bound SQL warehouse's id as DATABRICKS_WAREHOUSE_ID. `valueFrom` references the
+  # resource named `sql-warehouse` declared in databricks.yml; without this the app can't query.
+  - name: "DATABRICKS_WAREHOUSE_ID"
+    valueFrom: "sql-warehouse"
+  # Optional: pin a default catalog the UI preselects. Users can still switch in the UI.
+  - name: "DEFAULT_CATALOG"
+    value: ""

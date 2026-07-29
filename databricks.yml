@@ -1,0 +1,52 @@
+# Databricks Asset Bundle for the Parsed Document Viewer app.
+#
+# Deploy:
+#   databricks bundle deploy -t dev
+#   databricks bundle run parsed_doc_viewer -t dev     # starts the app
+#
+# The app has NO required configuration: users pick the catalog, volume, PDF, and
+# parsed Delta table from the UI at runtime. The only thing it needs is a SQL
+# warehouse to query, which the app resolves at runtime (see app.py).
+bundle:
+  name: parsed-doc-viewer
+
+variables:
+  warehouse_id:
+    description: >-
+      SQL warehouse ID the app uses to list volumes/tables and read parsed rows.
+      Find it under SQL Warehouses > (your warehouse) > Connection details.
+    # No default on purpose: pass --var="warehouse_id=..." on every deploy AND run so an
+    # unset value fails fast here instead of silently deploying an app with no warehouse.
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace.host is taken from your CLI profile (databricks auth login).
+    resources:
+      apps:
+        parsed_doc_viewer:
+          name: parsed-doc-viewer
+          description: "View an original PDF next to its ai_parse_document output."
+          source_code_path: ./src
+          resources:
+            - name: sql-warehouse
+              description: "Warehouse used to read Unity Catalog metadata and parsed tables."
+              sql_warehouse:
+                id: ${var.warehouse_id}
+                permission: "CAN_USE"
+
+  prod:
+    mode: production
+    resources:
+      apps:
+        parsed_doc_viewer:
+          name: parsed-doc-viewer
+          description: "View an original PDF next to its ai_parse_document output."
+          source_code_path: ./src
+          resources:
+            - name: sql-warehouse
+              description: "Warehouse used to read Unity Catalog metadata and parsed tables."
+              sql_warehouse:
+                id: ${var.warehouse_id}
+                permission: "CAN_USE"

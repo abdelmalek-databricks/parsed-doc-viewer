@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Parsed Document Viewer</title>
+<!-- pdf.js is vendored under static/vendor/ so the app has no external/CDN dependency at runtime -->
+<script src="vendor/pdf.min.mjs" type="module"></script>
+<style>
+  :root { --fg:#1b1b1b; --muted:#6b7280; --line:#e5e7eb; --accent:#2272b4; --bg:#f7f8fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         color:var(--fg); background:var(--bg); }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:10px 16px; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  select, button { font:inherit; padding:5px 8px; border:1px solid var(--line);
+                   border-radius:6px; background:#fff; color:var(--fg); }
+  select:disabled { color:var(--muted); background:#f3f4f6; }
+  button { cursor:pointer; }
+  button:disabled { cursor:default; opacity:.5; }
+  label { color:var(--muted); font-size:12px; margin-right:4px; }
+  .field { display:flex; align-items:center; }
+  .field select { max-width:180px; }
+  /* per-pane selector row */
+  .browser { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center;
+             padding-bottom:10px; margin-bottom:10px; border-bottom:1px dashed var(--line); }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line);
+         height:calc(100vh - 53px); }
+  .pane { background:#fff; overflow:auto; padding:14px; }
+  .pane h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+             margin:0 0 10px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  #pdfCanvasWrap { display:flex; justify-content:center; }
+  canvas { max-width:100%; box-shadow:0 1px 4px rgba(0,0,0,.12); }
+  .pager { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .pager input { width:64px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; }
+  .elem { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  .elem .badge { display:inline-block; font-size:11px; font-weight:600; padding:1px 7px;
+                 border-radius:10px; background:#eef2ff; color:#3730a3; margin-bottom:6px; }
+  .elem .badge.table { background:#ecfdf5; color:#065f46; }
+  .elem .badge.figure { background:#fef3c7; color:#92400e; }
+  .elem .badge.page_header,.elem .badge.page_footer,.elem .badge.page_number { background:#f3f4f6; color:#4b5563; }
+  .elem .content { white-space:pre-wrap; word-break:break-word; }
+  .elem table { border-collapse:collapse; width:100%; font-size:12px; }
+  .elem table td,.elem table th { border:1px solid var(--line); padding:3px 6px; text-align:left; }
+  .elem details { margin-top:6px; }
+  .elem details pre, pre.rawpage { background:var(--bg); padding:8px; border-radius:6px; overflow:auto;
+                      font-size:11px; margin:4px 0 0; white-space:pre; }
+  pre.rawpage { max-height:none; }
+  .msg { color:var(--muted); padding:20px; text-align:center; }
+  .err { color:#b91c1c; background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:10px; }
+  .opt { font-size:12px; color:var(--muted); font-weight:400; text-transform:none; letter-spacing:0; }
+</style>
+</head>
+<body>
+<header><h1>Parsed Document Viewer</h1></header>
+<main>
+  <!-- LEFT: original PDF, with its own volume browser -->
+  <section class="pane">
+    <div class="browser">
+      <div class="field"><label>Catalog</label><select id="catL" disabled></select></div>
+      <div class="field"><label>Schema</label><select id="schL" disabled></select></div>
+      <div class="field"><label>Volume</label><select id="volL" disabled></select></div>
+      <div class="field"><label>PDF</label><select id="pdfL" disabled></select></div>
+    </div>
+    <h2>Original PDF</h2>
+    <div class="pager">
+      <button id="prev">‹ Prev</button>
+      <span>Page</span><input id="pageInput" type="number" min="1" value="1" />
+      <span id="pageTotal">/ –</span>
+      <button id="next">Next ›</button>
+    </div>
+    <div id="pdfCanvasWrap"><canvas id="pdfCanvas"></canvas></div>
+    <div id="pdfMsg" class="msg">Pick a catalog, schema, volume and PDF above.</div>
+  </section>
+
+  <!-- RIGHT: parsed output, with its own independent table browser -->
+  <section class="pane">
+    <div class="browser">
+      <div class="field"><label>Catalog</label><select id="catR" disabled></select></div>
+      <div class="field"><label>Schema</label><select id="schR" disabled></select></div>
+      <div class="field"><label>Parsed table</label><select id="tblR" disabled></select></div>
+      <div class="field"><label>Document</label><select id="docR" disabled></select></div>
+    </div>
+    <h2>Parsed output — <span id="tableLabel">(no table selected)</span>
+      <label class="opt"><input type="checkbox" id="rawToggle" /> show raw JSON (per element)</label>
+      <label class="opt"><input type="checkbox" id="rawPageToggle" /> show raw page</label>
+    </h2>
+    <div id="parsed" class="msg">Pick a parsed table above to see elements for the current page.</div>
+  </section>
+</main>
+
+<script type="module">
+import * as pdfjsLib from "./vendor/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdf.worker.min.mjs";
+
+const $ = id => document.getElementById(id);
+// Two independent selection contexts: pdf (left) and tbl (right). Page is shared.
+const S = {
+  pdf: { catalog:null, schema:null, volume:null, path:null },
+  tbl: { catalog:null, schema:null, table:null, document:"" },
+  pdfDoc:null, numPages:0, page:1,
+};
+
+async function api(path, params) {
+  const url = new URL(path, location.origin);
+  Object.entries(params || {}).forEach(([k,v]) => v!=null && v!=="" && url.searchParams.set(k,v));
+  const r = await fetch(url);
+  if (!r.ok) { const t = await r.text(); throw new Error(JSON.parse(t).detail || t); }
+  return r.json();
+}
+function fill(sel, items, { placeholder } = {}) {
+  sel.innerHTML = "";
+  if (placeholder) sel.append(new Option(placeholder, ""));
+  items.forEach(it => {
+    const [val,label] = Array.isArray(it) ? it : [it,it];
+    sel.append(new Option(label, val));
+  });
+  sel.disabled = false;
+}
+function reset(...sels) { sels.forEach(id => { $(id).innerHTML=""; $(id).disabled=true; }); }
+
+// ---- shared: load catalogs into both browsers -------------------------------
+async function init() {
+  const { catalogs, default:def } = await api("/api/catalogs");
+  fill($("catL"), catalogs, { placeholder:"— select —" });
+  fill($("catR"), catalogs, { placeholder:"— select —" });
+  if (def) {
+    $("catL").value = def; onCatL();
+    $("catR").value = def; onCatR();
+  }
+}
+
+// ---- LEFT browser: catalog -> schema -> volume -> pdf ------------------------
+async function onCatL() {
+  S.pdf.catalog = $("catL").value; reset("schL","volL","pdfL");
+  if (!S.pdf.catalog) return;
+  const { schemas } = await api("/api/schemas", { catalog:S.pdf.catalog });
+  fill($("schL"), schemas, { placeholder:"— select —" });
+}
+async function onSchL() {
+  S.pdf.schema = $("schL").value; reset("volL","pdfL");
+  if (!S.pdf.schema) return;
+  const { volumes } = await api("/api/volumes", { catalog:S.pdf.catalog, schema:S.pdf.schema });
+  fill($("volL"), volumes, { placeholder:"— select —" });
+}
+async function onVolL() {
+  S.pdf.volume = $("volL").value; reset("pdfL");
+  if (!S.pdf.volume) return;
+  const { pdfs } = await api("/api/pdfs",
+    { catalog:S.pdf.catalog, schema:S.pdf.schema, volume:S.pdf.volume });
+  fill($("pdfL"), pdfs.map(p => [p.path, p.name]), { placeholder:"— select —" });
+}
+async function onPdfL() {
+  S.pdf.path = $("pdfL").value;
+  if (!S.pdf.path) return;
+  $("pdfMsg").textContent = "Loading PDF…";
+  const url = new URL("/api/pdf", location.origin);
+  Object.entries({ catalog:S.pdf.catalog, schema:S.pdf.schema, volume:S.pdf.volume,
+                   path:S.pdf.path }).forEach(([k,v]) => url.searchParams.set(k,v));
+  try {
+    S.pdfDoc = await pdfjsLib.getDocument(url.toString()).promise;
+    S.numPages = S.pdfDoc.numPages;
+    $("pageTotal").textContent = "/ " + S.numPages;
+    $("pdfMsg").textContent = "";
+    goPage(Math.min(S.page, S.numPages));
+  } catch (e) { $("pdfMsg").innerHTML = `<div class="err">PDF load failed: ${e.message}</div>`; }
+}
+
+// ---- RIGHT browser: catalog -> schema -> table -> document ------------------
+async function onCatR() {
+  S.tbl.catalog = $("catR").value; reset("schR","tblR","docR");
+  if (!S.tbl.catalog) return;
+  const { schemas } = await api("/api/schemas", { catalog:S.tbl.catalog });
+  fill($("schR"), schemas, { placeholder:"— select —" });
+}
+async function onSchR() {
+  S.tbl.schema = $("schR").value; reset("tblR","docR");
+  if (!S.tbl.schema) return;
+  const { tables } = await api("/api/tables", { catalog:S.tbl.catalog, schema:S.tbl.schema });
+  fill($("tblR"), tables.map(t => [t.name, (t.compatible?"✓ ":"") + t.name]),
+       { placeholder:"— select —" });
+}
+async function onTblR() {
+  S.tbl.table = $("tblR").value; reset("docR");
+  $("tableLabel").textContent = S.tbl.table || "(no table selected)";
+  if (!S.tbl.table) return;
+  $("parsed").textContent = "Loading table metadata…";
+  try {
+    const meta = await api("/api/parsed_meta",
+      { catalog:S.tbl.catalog, schema:S.tbl.schema, table:S.tbl.table });
+    fill($("docR"), meta.documents, meta.documents.length>1 ? {placeholder:"— all —"} : {});
+    S.tbl.document = meta.documents.length===1 ? meta.documents[0] : "";
+    if (S.tbl.document) $("docR").value = S.tbl.document;
+    renderParsed();
+  } catch (e) { $("parsed").className=""; $("parsed").innerHTML = `<div class="err">${e.message}</div>`; }
+}
+function onDocR() { S.tbl.document = $("docR").value; renderParsed(); }
+
+// ---- rendering --------------------------------------------------------------
+async function renderPdfPage(n) {
+  if (!S.pdfDoc) return;
+  const pg = await S.pdfDoc.getPage(n);
+  const wrapW = $("pdfCanvasWrap").clientWidth || 600;
+  const base = pg.getViewport({ scale:1 });
+  const vp = pg.getViewport({ scale: Math.min(2, wrapW / base.width) });
+  const cv = $("pdfCanvas"); cv.width = vp.width; cv.height = vp.height;
+  await pg.render({ canvasContext: cv.getContext("2d"), viewport: vp }).promise;
+}
+async function renderParsed() {
+  if (!S.tbl.table) return;
+  const box = $("parsed");
+  const rawPage = $("rawPageToggle").checked;
+  const wantRaw = rawPage || $("rawToggle").checked;   // page-JSON view also needs raw from backend
+  try {
+    const { elements } = await api("/api/parsed_page", {
+      catalog:S.tbl.catalog, schema:S.tbl.schema, table:S.tbl.table,
+      page:S.page, document:S.tbl.document, include_raw:wantRaw });
+    if (!elements.length) { box.className="msg"; box.textContent=`No parsed elements on page ${S.page}.`; return; }
+    box.className=""; box.innerHTML="";
+
+    // "show raw page": dump the whole page as one JSON array of raw elements
+    if (rawPage) {
+      const arr = elements.map(e => { try { return JSON.parse(e.raw); } catch { return e.raw; } });
+      const pre = document.createElement("pre"); pre.className = "rawpage";
+      pre.textContent = JSON.stringify(arr, null, 2);
+      box.append(pre);
+      return;
+    }
+
+    // default: one card per element (with optional per-element raw JSON)
+    for (const el of elements) {
+      const div = document.createElement("div"); div.className="elem";
+      const t = (el.element_type||"text").toLowerCase();
+      const badge = document.createElement("span");
+      badge.className = "badge " + t; badge.textContent = el.element_type || "text";
+      div.append(badge);
+      const c = document.createElement("div"); c.className="content";
+      // tables come back as HTML from ai_parse_document; render them, everything else is text
+      if (t==="table" && /<t(able|r|d|h)/i.test(el.content||"")) c.innerHTML = el.content;
+      else c.textContent = el.content || "";
+      div.append(c);
+      if (el.raw) {
+        const d = document.createElement("details");
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(JSON.parse(el.raw), null, 2);
+        d.append(Object.assign(document.createElement("summary"), {textContent:"raw JSON"}), pre);
+        div.append(d);
+      }
+      box.append(div);
+    }
+  } catch (e) { box.className=""; box.innerHTML = `<div class="err">${e.message}</div>`; }
+}
+
+function goPage(n) {
+  n = Math.max(1, Math.min(n, S.numPages || n));
+  S.page = n; $("pageInput").value = n;
+  renderPdfPage(n); renderParsed();
+}
+
+// ---- wiring -----------------------------------------------------------------
+$("catL").onchange = onCatL;  $("schL").onchange = onSchL;
+$("volL").onchange = onVolL;  $("pdfL").onchange = onPdfL;
+$("catR").onchange = onCatR;  $("schR").onchange = onSchR;
+$("tblR").onchange = onTblR;  $("docR").onchange = onDocR;
+$("prev").onclick = () => goPage(S.page-1);
+$("next").onclick = () => goPage(S.page+1);
+$("pageInput").onchange = e => goPage(parseInt(e.target.value)||1);
+$("rawToggle").onchange = () => { if ($("rawToggle").checked) $("rawPageToggle").checked = false; renderParsed(); };
+$("rawPageToggle").onchange = () => { if ($("rawPageToggle").checked) $("rawToggle").checked = false; renderParsed(); };
+window.onresize = () => S.pdfDoc && renderPdfPage(S.page);
+
+init().catch(e => $("pdfMsg").innerHTML = `<div class="err">${e.message}</div>`);
+</script>
+</body>
+</html>
