@@ -124,21 +124,6 @@ table dropdown, any table that matches this shape gets a ✓ next to it, so you 
 to remember which one is which. If you pick a table that's missing one of the required
 columns, the app will tell you which column it couldn't find rather than failing silently.
 
-## Trying it locally first
-
-If you want to poke at it on your laptop before deploying:
-
-```bash
-cd src
-pip install -r requirements.txt
-export DATABRICKS_PROFILE=<your CLI profile>
-export DATABRICKS_WAREHOUSE_ID=<YOUR_WAREHOUSE_ID>
-uvicorn app:app --reload --port 8000
-```
-
-Then open http://localhost:8000. It authenticates through your CLI profile, so you're
-looking at the same data you'd see in the workspace.
-
 ## What's in here
 
 ```
@@ -152,16 +137,4 @@ parsed-doc-viewer/
     └── static/
         ├── index.html      the whole UI — plain JavaScript, no build step
         └── vendor/         pdf.js, served by the app itself (no external dependency)
-```
-
-## Worth knowing
-
-- The app is fully self-contained: pdf.js is bundled under `src/static/vendor/` and served
-  by the app, so nothing is fetched from the internet at runtime. It works the same on an
-  air-gapped or network-restricted workspace.
-- Each PDF is held in the app's memory after the first load, which keeps page turns
-  quick. Very large PDFs, or a lot of them in one session, will grow that footprint.
-- Page numbers line up between the two panels even for documents over 500 pages.
-  `ai_parse_document` has to parse those in slices, but it numbers the pages against the
-  whole document rather than each slice, so the stitched table matches the PDF one to one.
 ```
